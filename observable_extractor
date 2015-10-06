@@ -19,24 +19,42 @@
 # limitations under the License.
 
 
-from docopt import docopt
-from mimetypes import guess_type
-from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
-from pdfminer.converter import TextConverter
-from pdfminer.layout import LAParams
-from pdfminer.pdfpage import PDFPage
 from cStringIO import StringIO
+from cybox.common import Hash
+from cybox.core import Observables
+from cybox.core.observable import Observable, ObservableComposition
+from cybox.objects.address_object import Address
+from cybox.objects.file_object import File
+from cybox.objects.uri_object import URI
+from cybox.utils import Namespace
+from cybox.utils import set_id_namespace as set_cybox_id_namespace
+from docopt import docopt
 from docx import Document as docx_doc
 from miette import DocReader as doc_doc
-import xlrd 
+from mimetypes import guess_type
+from pdfminer.converter import TextConverter
+from pdfminer.layout import LAParams
+from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+from pdfminer.pdfpage import PDFPage
+from stix.core import STIXPackage, STIXHeader
+from stix.indicator import Indicator
+from stix.utils import set_id_namespace as set_stix_id_namespace
 import re
+import xlrd 
 
 
+__version__ = '0.2'
 
-__doc__ = """observable_extractor.py :: extract observables from various file formats
+__doc__ = """observable_extractor: extract IOCs from .xls(x), .doc(x), pdf, txt, csv and output .csv or STIX
 
-Usage:
-    observable_extractor.py --input=INPUT
+Usage: observable_extractor [options]
+
+Options:
+    -i INPUT, --input=INPUT           Specify input file
+    -o OUTPUT, --output=OUTPUT        Specify output file [prints to stdout, if not specified]
+    -f FORMAT, --format=FORMAT        Specify output format [stix, csv]
+    -h, --help                        Print usage message
+    -v, --version                     Print version
 """
 
 
@@ -60,6 +78,7 @@ def pdf_to_txt(file_):
     device.close()
     retstr.close()
     return(txt)
+
 
 def excel_to_txt(file_):
     '''convert an excel to text'''
@@ -122,29 +141,109 @@ def observables_from_txt(txt):
     return(observables)
 
 
-
-if __name__ == '__main__':
-    args = docopt(__doc__)
-    file_ = args['--input']
+def extract_observables(file_):
+    '''takes a filepath, returns a dict of observables or None'''
     filetype = guess_type(file_)[0]
     if filetype in ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']:
-        observables = observables_from_txt(excel_to_txt(file_))
+        return observables_from_txt(excel_to_txt(file_))
     elif filetype in ['application/vnd.openxmlformats-officedocument.wordprocessingml.document']:
-        observables = observables_from_txt(docx_to_txt(file_))
+        return observables_from_txt(docx_to_txt(file_))
     elif filetype in ['application/msword']:
-        observables = observables_from_txt(doc_to_txt(file_))
+        return observables_from_txt(doc_to_txt(file_))
     elif filetype in ['application/pdf']:
-        observables = observables_from_txt(pdf_to_txt(file_))
+        return observables_from_txt(pdf_to_txt(file_))
     elif filetype in ['text/plain', 'text/csv']:
         txt_file = open(file_)
         txt = txt_file.read()
         txt_file.close
-        observables = observables_from_txt(txt)
+        return observables_from_txt(txt)
     else: 
-        observables = None
-        print(filetype)
-    # for key in observables.keys():
-    #     print('%s: %i' % (key, len(observables[key])))
-    for key in observables.keys():
-        for i in observables[key]:
-            print('%s: %s' % (key, i))
+        return None
+
+
+def observables_to_csv(observables):
+    '''takes a dict of observables, returns csv'''
+    str_ = 'observable_type,observable_value\n'
+    for k, v in observables.items():
+        if v:
+            for i in v:
+                str_ += "%s,%s\n" % (k, i)
+    return str_
+
+
+def observables_to_stix(observables, title):
+    '''takes a dict of observables, returns stix'''
+    xmlns_url = 'https://github.com/soltra/observable_extractor/'
+    xmlns_name = 'soltra_observable_extractor'
+    set_stix_id_namespace({xmlns_url: xmlns_name})
+    set_cybox_id_namespace(Namespace(xmlns_url, xmlns_name))
+    stix_package = STIXPackage()
+    stix_header = STIXHeader()
+    stix_package.stix_header = stix_header
+    observable_ids = list()
+    for k, v in observables.items():
+        if v:
+            for i in v:
+                if k == 'ip':
+                    addr = Address(address_value=i, category='ipv4-addr')
+                    addr.condition = 'Equals'
+                    observable_ = Observable(addr)
+                    observable_ids.append(observable_.id_)
+                    stix_package.add_observable(observable_)
+                elif k == 'url':
+                    url = URI()
+                    url.type_ = 'URL'
+                    url.value = i
+                    url.condition = 'Equals'
+                    observable_ = Observable(url)
+                    observable_ids.append(observable_.id_)
+                    stix_package.add_observable(observable_)
+                elif k in ['sha512', 'sha256', 'sha1', 'md5']:
+                    file_object = File()
+                    file_object.add_hash(Hash(i, type_=k.upper()))
+                    for j in file_object.hashes:
+                        j.simple_hash_value.condition = "Equals"
+                    observable_ = Observable(file_object)
+                    observable_ids.append(observable_.id_)
+                    stix_package.add_observable(observable_)
+                else:
+                    pass
+    indicator_ = Indicator()
+    indicator_.title = title
+    indicator_.description = title
+    indicator_.confidence = 'Unknown'
+    indicator_.add_indicator_type('Malware Artifacts')
+    observable_composition_ = ObservableComposition()
+    observable_composition_.operator = 'OR'
+    for observable_id in observable_ids:
+        observable_ = Observable()
+        observable_.idref = observable_id
+        observable_composition_.add(observable_)
+    indicator_.observable = Observable()
+    indicator_.observable.observable_composition = observable_composition_
+    stix_package.add_indicator(indicator_)
+    return stix_package
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__)
+    input_ = args['--input']
+    output_ = args['--output']
+    # default to stix output if format not specified...
+    if not args['--format']:
+        format_ = 'stix'
+    else:
+        format_ = args['--format']
+    observables = extract_observables(input_)
+    if observables:
+        if format_ == 'csv':
+            cooked_output = observables_to_csv(observables)
+        elif format_ == 'stix':
+            raw_output = observables_to_stix(observables, title="IOCs extracted from %s via observable_extractor" % (input_))
+            cooked_output = raw_output.to_xml(pretty=True)
+        if not output_:
+            print(cooked_output)
+        else:
+            file_ = open(output_, 'w')
+            file_.write(cooked_output)
+            file_.close()
