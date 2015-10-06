@@ -28,7 +28,7 @@ from cybox.objects.file_object import File
 from cybox.objects.uri_object import URI
 from cybox.utils import Namespace
 from cybox.utils import set_id_namespace as set_cybox_id_namespace
-from docopt import docopt
+from docopt import docopt, DocoptExit
 from docx import Document as docx_doc
 from miette import DocReader as doc_doc
 from mimetypes import guess_type
@@ -228,6 +228,9 @@ def observables_to_stix(observables, title):
 if __name__ == '__main__':
     args = docopt(__doc__)
     input_ = args['--input']
+    if not input_:
+        print DocoptExit().usage
+        exit()
     output_ = args['--output']
     # default to stix output if format not specified...
     if not args['--format']:
